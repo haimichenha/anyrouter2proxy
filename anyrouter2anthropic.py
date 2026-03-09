@@ -250,6 +250,14 @@ async def messages(request: Request):
     logger.info("====================================")
 
     req = strip_model_prefix(req)
+
+    # 清除上游代理（如 CLIProxyAPI）注入的 system/metadata/thinking，
+    # 让 Node.js 层注入完整正确的 Claude Code 格式
+    for field in ("system", "metadata", "thinking"):
+        if field in req:
+            logger.info("清除上游注入的 %s 字段，交由 Node.js 层重新注入", field)
+            del req[field]
+
     req = ensure_metadata(req)
     req = ensure_max_tokens(req)
 
