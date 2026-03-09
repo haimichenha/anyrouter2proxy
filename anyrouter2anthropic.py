@@ -44,6 +44,8 @@ logger = logging.getLogger(__name__)
 NODE_PROXY_URL = os.getenv("NODE_PROXY_URL", "http://127.0.0.1:4000")
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "120"))
 DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "8192"))
+# 模型名称前缀剥离（CLIProxyAPI 传递别名如 anyrouterclaude-opus-4-6，需剥离为 claude-opus-4-6）
+MODEL_PREFIX_STRIP = os.getenv("MODEL_PREFIX_STRIP", "anyrouter")
 
 
 @dataclass
@@ -116,6 +118,17 @@ def ensure_metadata(req: dict[str, Any]) -> dict[str, Any]:
 def ensure_max_tokens(req: dict[str, Any]) -> dict[str, Any]:
     if "max_tokens" not in req:
         req["max_tokens"] = DEFAULT_MAX_TOKENS
+    return req
+
+
+def strip_model_prefix(req: dict[str, Any]) -> dict[str, Any]:
+    """剥离 CLIProxyAPI 添加的模型名称前缀（如 anyrouterclaude-opus-4-6 → claude-opus-4-6）"""
+    model = req.get("model", "")
+    if MODEL_PREFIX_STRIP and model.startswith(MODEL_PREFIX_STRIP):
+        original = model
+        model = model[len(MODEL_PREFIX_STRIP):]
+        req["model"] = model
+        logger.info("模型名称前缀剥离: %s → %s", original, model)
     return req
 
 
@@ -227,6 +240,7 @@ async def messages(request: Request):
     ))
     logger.info("====================================")
 
+    req = strip_model_prefix(req)
     req = ensure_metadata(req)
     req = ensure_max_tokens(req)
 

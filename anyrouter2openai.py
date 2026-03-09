@@ -49,6 +49,8 @@ HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "120"))
 DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "8192"))
 FORCE_NON_STREAM = os.getenv("FORCE_NON_STREAM", "false").lower() in ("true", "1", "yes")
 DEFAULT_SYSTEM_PROMPT = os.getenv("DEFAULT_SYSTEM_PROMPT", "You are Claude, a helpful AI assistant.")
+# 模型名称前缀剥离（CLIProxyAPI 传递别名如 anyrouterclaude-opus-4-6，需剥离为 claude-opus-4-6）
+MODEL_PREFIX_STRIP = os.getenv("MODEL_PREFIX_STRIP", "anyrouter")
 
 
 @dataclass
@@ -363,6 +365,13 @@ async def chat_completions(request: Request):
         raise HTTPException(status_code=401, detail={"error": {"message": "Invalid API key", "type": "authentication_error"}})
 
     openai_request = await request.json()
+
+    # 剥离 CLIProxyAPI 添加的模型名称前缀
+    model_raw = openai_request.get("model", "")
+    if MODEL_PREFIX_STRIP and model_raw.startswith(MODEL_PREFIX_STRIP):
+        openai_request["model"] = model_raw[len(MODEL_PREFIX_STRIP):]
+        logger.info("模型名称前缀剥离: %s → %s", model_raw, openai_request["model"])
+
     anthropic_request = convert_openai_to_anthropic(openai_request)
 
     # 记录完整的客户端请求信息（用于调试）
