@@ -147,11 +147,20 @@ app = FastAPI(title="AnyRouter Anthropic Proxy (Node.js SDK Mode)", lifespan=lif
 
 def build_forwarding_headers(api_key: str, original_headers: dict[str, str] = None) -> dict[str, str]:
     """构建转发到 Node.js 代理的请求头，透传客户端所有特殊头（如 Claude Code 头）"""
-    # 需要跳过的 hop-by-hop 头和内部头
+    # 需要跳过的头：hop-by-hop + Node.js 层需要强制覆盖的伪装头
+    # Node.js 层用 if (!headers[...]) 判断，如果 CLIProxyAPI 传了这些头会导致伪装失败
     SKIP_HEADERS = {
         "host", "content-length", "transfer-encoding", "connection",
         "keep-alive", "upgrade", "proxy-authorization", "proxy-connection",
         "accept-encoding",
+        # 以下头由 Node.js 层注入正确的 Claude Code 值，必须剥离上游传入的
+        "user-agent", "anthropic-beta", "anthropic-version",
+        "x-app", "x-stainless-lang", "x-stainless-package-version",
+        "x-stainless-os", "x-stainless-arch", "x-stainless-runtime",
+        "x-stainless-runtime-version", "x-stainless-retry-count",
+        "x-stainless-timeout", "sec-fetch-mode", "accept-language",
+        "claude-code-attribution-header", "claude-code-disable-nonessential-traffic",
+        "anthropic-dangerous-direct-browser-access",
     }
 
     headers = {}
