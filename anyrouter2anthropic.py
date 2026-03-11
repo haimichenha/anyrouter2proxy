@@ -265,9 +265,7 @@ async def messages(request: Request):
     forwarding_headers = build_forwarding_headers(account.api_key, original_headers)
 
     model = req.get("model", "unknown")
-    if "stream" not in req:                                                                                                      
-        req["stream"] = True
-    is_stream = req.get("stream", True)
+    is_stream = req.get("stream", False)
     logger.info("[%s] %s stream=%s (via Node.js)", account.name, model, is_stream)
 
     if is_stream:
@@ -301,6 +299,7 @@ async def messages(request: Request):
 async def list_models(request: Request):
     """列出可用模型"""
     models = [
+        {"id": "claude-opus-4-6", "name": "Claude Opus 4.6"},
         {"id": "claude-opus-4-5-20251101", "name": "Claude Opus 4.5"},
         {"id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5"},
         {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4"},
