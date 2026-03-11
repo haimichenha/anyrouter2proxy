@@ -11,7 +11,7 @@ services:
     restart: unless-stopped
     environment:
       - NODE_PROXY_PORT=${NODE_PROXY_PORT:-4000}
-      - ANYROUTER_BASE_URL=${ANYROUTER_BASE_URL:-https://anyrouter.top}
+      - ANYROUTER_BASE_URL=${ANYROUTER_BASE_URL:-https://a-ocnfniawgw.cn-shanghai.fcapp.run}
     ports:
       - "4000:4000"
     healthcheck:
