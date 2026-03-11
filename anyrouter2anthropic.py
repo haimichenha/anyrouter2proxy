@@ -266,8 +266,8 @@ async def messages(request: Request):
 
     model = req.get("model", "unknown")
     if "stream" not in req:                                                                                                      
-      270 +        req["stream"] = True                                                                                                     
-      271 +    is_stream = req.get("stream", True)
+        req["stream"] = True
+    is_stream = req.get("stream", True)
     logger.info("[%s] %s stream=%s (via Node.js)", account.name, model, is_stream)
 
     if is_stream:
