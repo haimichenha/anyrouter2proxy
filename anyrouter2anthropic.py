@@ -265,7 +265,9 @@ async def messages(request: Request):
     forwarding_headers = build_forwarding_headers(account.api_key, original_headers)
 
     model = req.get("model", "unknown")
-    is_stream = req.get("stream", False)
+    if "stream" not in req:                                                                                                      
+      270 +        req["stream"] = True                                                                                                     
+      271 +    is_stream = req.get("stream", True)
     logger.info("[%s] %s stream=%s (via Node.js)", account.name, model, is_stream)
 
     if is_stream:
