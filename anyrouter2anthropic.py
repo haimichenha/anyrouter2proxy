@@ -42,7 +42,9 @@ logger = logging.getLogger(__name__)
 
 # 从环境变量读取配置
 NODE_PROXY_URL = os.getenv("NODE_PROXY_URL", "http://127.0.0.1:4000")
-HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "120"))
+# 上游超时（秒）：连接超时 / 读取超时（流式期间两 chunk 间的最大等待）
+HTTP_CONNECT_TIMEOUT = float(os.getenv("HTTP_CONNECT_TIMEOUT", "30"))
+HTTP_READ_TIMEOUT = float(os.getenv("HTTP_READ_TIMEOUT", "300"))
 DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "8192"))
 # 模型名称前缀剥离（CLIProxyAPI 传递别名如 anyrouterclaude-opus-4-6，需剥离为 claude-opus-4-6）
 MODEL_PREFIX_STRIP = os.getenv("MODEL_PREFIX_STRIP", "anyrouter")
@@ -135,9 +137,17 @@ def strip_model_prefix(req: dict[str, Any]) -> dict[str, Any]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global http_client
-    http_client = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            connect=HTTP_CONNECT_TIMEOUT,
+            read=HTTP_READ_TIMEOUT,
+            write=30.0,
+            pool=30.0,
+        )
+    )
     logger.info("Started: Node.js SDK proxy mode enabled")
     logger.info("Node.js proxy URL: %s", NODE_PROXY_URL)
+    logger.info("Timeouts: connect=%.0fs read=%.0fs", HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT)
     yield
     await http_client.aclose()
 
@@ -216,6 +226,96 @@ async def stream_response(
         yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': str(e)}})}\n\n"
 
 
+async def collect_stream_as_message(
+    req: dict[str, Any],
+    account: Account,
+    forwarding_headers: dict[str, str],
+) -> dict[str, Any]:
+    """
+    对上游始终使用流式请求（避免长时间无数据导致超时），
+    收集全部 SSE 事件后组装为完整的 Anthropic 消息 JSON。
+    """
+    client = get_client()
+
+    # 强制上游流式
+    upstream_req = {**req, "stream": True}
+
+    message: dict[str, Any] = {}
+    content_blocks: list[dict[str, Any]] = []
+    current_block: dict[str, Any] | None = None
+
+    async with client.stream(
+        "POST",
+        f"{NODE_PROXY_URL}/v1/messages",
+        headers=forwarding_headers,
+        json=upstream_req,
+    ) as resp:
+        if resp.status_code != 200:
+            error_text = await resp.aread()
+            logger.error("[%s] collect error %d: %s", account.name, resp.status_code, error_text.decode()[:200])
+            raise HTTPException(status_code=resp.status_code, detail=error_text.decode())
+
+        async for raw_line in resp.aiter_lines():
+            line = raw_line.strip()
+            if not line or not line.startswith("data: "):
+                continue
+
+            try:
+                event = json.loads(line[6:])
+            except json.JSONDecodeError:
+                continue
+
+            etype = event.get("type")
+
+            if etype == "message_start":
+                message = event.get("message", {})
+                message["content"] = []
+
+            elif etype == "content_block_start":
+                current_block = event.get("content_block", {})
+
+            elif etype == "content_block_delta":
+                delta = event.get("delta", {})
+                if current_block is None:
+                    continue
+                dt = delta.get("type")
+                if dt == "text_delta":
+                    current_block["text"] = current_block.get("text", "") + delta.get("text", "")
+                elif dt == "thinking_delta":
+                    current_block["thinking"] = current_block.get("thinking", "") + delta.get("thinking", "")
+                elif dt == "input_json_delta":
+                    current_block["input"] = current_block.get("input", "") + delta.get("partial_json", "")
+
+            elif etype == "content_block_stop":
+                if current_block:
+                    # tool_use 的 input 是增量拼接的字符串，需要解析为 JSON
+                    if current_block.get("type") == "tool_use" and isinstance(current_block.get("input"), str):
+                        try:
+                            current_block["input"] = json.loads(current_block["input"])
+                        except json.JSONDecodeError:
+                            pass
+                    content_blocks.append(current_block)
+                    current_block = None
+
+            elif etype == "message_delta":
+                delta = event.get("delta", {})
+                usage = event.get("usage", {})
+                if "stop_reason" in delta:
+                    message["stop_reason"] = delta["stop_reason"]
+                if "stop_sequence" in delta:
+                    message["stop_sequence"] = delta["stop_sequence"]
+                if usage:
+                    message.setdefault("usage", {}).update(usage)
+
+            elif etype == "error":
+                error_info = event.get("error", {})
+                raise HTTPException(status_code=500, detail=json.dumps({"type": "error", "error": error_info}))
+
+    message["content"] = content_blocks
+    logger.info("[%s] 流式收集完成: %d 个 content block", account.name, len(content_blocks))
+    return message
+
+
 @app.post("/v1/messages")
 async def messages(request: Request):
     # 提取并验证 API keys
@@ -269,26 +369,19 @@ async def messages(request: Request):
     logger.info("[%s] %s stream=%s (via Node.js)", account.name, model, is_stream)
 
     if is_stream:
+        # 客户端要求流式 → 直接透传 SSE
         return StreamingResponse(
             stream_response(req, account, forwarding_headers),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
     else:
-        client = get_client()
+        # 客户端要求非流式 → 对上游仍用流式（避免超时），收集后组装完整 JSON
         try:
-            resp = await client.post(
-                f"{NODE_PROXY_URL}/v1/messages",
-                headers=forwarding_headers,
-                json=req
-            )
-
-            if resp.status_code != 200:
-                logger.error("[%s] Error %d: %s", account.name, resp.status_code, resp.text[:200])
-                raise HTTPException(status_code=resp.status_code, detail=resp.text)
-
-            return JSONResponse(content=resp.json())
-
+            message = await collect_stream_as_message(req, account, forwarding_headers)
+            return JSONResponse(content=message)
+        except HTTPException:
+            raise
         except httpx.TimeoutException:
             raise HTTPException(status_code=504, detail="Request timeout")
         except httpx.HTTPError as e:
